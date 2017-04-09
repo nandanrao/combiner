@@ -15,16 +15,13 @@ import geotrellis.shapefile.ShapeFileReader
 import java.io.File
 import com.github.tototoshi.csv._
 
-// import geotrellis.raster.resample.{ResampleMethod, NearestNeighbor}
-// import geotrellis.raster.mapalgebra._
-
 object Combiner {
   def main(args: Array[String]) {
 
     if (args.length != 4) {
       System.err.println(s"""
         |Usage: Indexer <mobile>
-        |  <input> 
+        |  <tilePath> 
         |  <output> 
         |  <basicString> 
         |  <meanString> 
@@ -44,10 +41,10 @@ object Combiner {
 
     implicit val sc : SparkContext = spark.sparkContext
 
-    // val municipalities = ShapeFileReader.readMultiPolygonFeatures("./municipalities/LocalMunicipalities2011.shp")
-
+    // We use this to query the ETL DB, avoids reading tiles that we won't use. 
     val country : MultiPolygon = ShapeFileReader.readMultiPolygonFeatures("./ZAF/ZAF_adm0.shp")(0).geom
 
+    // Read from the database created by ETL process (Hadoop FS) 
     def makeRDD(layerName: String, path: String, country: MultiPolygon) = {
       val inLayerId = LayerId(layerName, 8)
       require(HadoopAttributeStore(path).layerExists(inLayerId))
@@ -58,6 +55,7 @@ object Combiner {
         .result
     }
 
+    // Performs efficient spatial join of two RDDs via SpatialKey
     def joinSingles(
       first: ContextRDD[SpatialKey, Seq[Tile], TileLayerMetadata[SpatialKey]], 
       second: ContextRDD[SpatialKey, Seq[Tile], TileLayerMetadata[SpatialKey]]) :
@@ -72,15 +70,14 @@ object Combiner {
     def readBasic(names: Seq[String]) = names.map(makeRDD(_, tilePath, country))
     def readMeans(names: Seq[String]) = names.map(makeRDD(_, tilePath, country)).map(r => TileLayerRDD(r, r.metadata).focalMean(Square(2)))
 
+    // read all normalized raster files from ETL Raster DB into RDDs
     val basics = readBasic(basicNames)
     val means = readMeans(meanNames)
     val reduced = (basics ++ means)
       .map(rdd => rdd.withContext{ _.mapValues(Seq(_))})
       .reduce(joinSingles)
 
-    // val mapTransform = reduced.metadata.layout.mapTransform
-    // reduced.map{ case (k, ts) => (k, ts.map(t => RasterToPoints.fromDouble(t, mapTransform(k)).toList ))}
-
+    // Create data for csv, collect to driver node. 
     val header = basicNames ++ meanNames.map(_ + "_neighborhood")
     val data = reduced
       .map{ case (t1, t2) => t2.map(_.toArrayDouble) }
@@ -94,8 +91,6 @@ object Combiner {
     writer.writeRow(header)
     writer.writeAll(data)
     writer.close()
-
-    // GeoTiff(reduced.stitch, reduced.metadata.crs).write("test-mean.tif")
   }
 }
 
